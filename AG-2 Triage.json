@@ -1,0 +1,2285 @@
+{
+  "name": "AG-2 Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {
+          "responseMode": "responseNodes"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ffcbb470-885b-45e2-a62b-21937e63e457",
+      "name": "When chat message received",
+      "webhookId": "710de78a-2201-4547-82b1-49f58070e8b0"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "de294dfb-8d1e-444b-b5f1-68638162aa96",
+              "name": "chatInput",
+              "value": "={{ $json.chatInput.replace(/\\[.*?\\]\\s*/, '') }}\n",
+              "type": "string"
+            },
+            {
+              "id": "2d3cc50b-64f4-4b64-94d9-3e2e0d557555",
+              "name": "customer_id",
+              "value": "={{ ($json.chatInput.match(/\\[(.*?)\\]/) || [null, 'UNKNOWN'])[1] }}\n",
+              "type": "string"
+            },
+            {
+              "id": "b6f1a99b-ba10-403e-ab5a-61941f420cd5",
+              "name": "asked_at",
+              "value": "={{ Date.now() }}",
+              "type": "string"
+            },
+            {
+              "id": "bb46da61-de24-4884-a59e-935a5b7de49d",
+              "name": "analyst",
+              "value": "analyst-1",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "80f83a78-76fc-42b9-8166-124da2962b4d",
+      "name": "Parse Question"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        544,
+        208
+      ],
+      "id": "f718ab69-8b83-46ee-931d-12793ccb6a09",
+      "name": "Embeddings OpenAI",
+      "alwaysOutputData": true,
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "load",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "prompt": "={{ $json.chatInput }}",
+        "topK": 10,
+        "options": {
+          "pineconeNamespace": "question-log"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        448,
+        0
+      ],
+      "id": "9752f238-ddad-44cf-a6c3-89d9570b3b0e",
+      "name": "Recent Questions",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const THRESHOLD = 0.72;\nconst WINDOW_MS = 86400000;\nconst me = String($('Parse Question').first().json.customer_id).trim();\nconst now = Date.now();\nconst hits = $input.all().filter(i => i.json.document).map(i => ({\n  customer: String(i.json.document.metadata.customer_id).trim(),\n  score: i.json.score,\n  text: i.json.document.pageContent,\n  at: Number(i.json.document.metadata.asked_at)\n})).filter(h => now - h.at <= WINDOW_MS);\nconst similar = hits.filter(h => h.score >= THRESHOLD);\nconst others = [...new Set(similar.map(h => h.customer).filter(c => c !== me && c !== 'UNKNOWN'))];\nreturn [{ json: { threshold: THRESHOLD, window_hours: WINDOW_MS / 3600000, similar_count: similar.length, other_customers: others, distinct_customers: others.length + 1, summary: hits.map(h => h.customer + ' ' + h.score.toFixed(2) + ' ' + h.text.slice(0, 40)).join(' | '), hits } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        0
+      ],
+      "id": "695b2d3e-65c1-484d-afdd-43a3b48ab11b",
+      "name": "Count Repeats"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Question: {{ $('Parse Question').first().json.chatInput }}\nRepeats in the last 24 hours: {{ $json.distinct_customers }} distinct customers including this one.\nSimilar earlier questions: {{ $json.summary }}\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are the Triage Agent for Odoo customer invoice support. Decide how to route a support question. Use search_jira to find the Jira ticket that best matches the question; AvaTax and Avalara are the same product. If a candidate exists, call get_ticket with its key to read the live status, priority and workaround. Decide whether the ticket really describes the same problem as the question: compare the symptoms and the cause, not just the wording. Routes: known_issue (matching ticket that is not Done), fixed_issue (matching ticket that is Done; give the fix version), repeat_untracked (several similar questions in the last 24 hours but no matching ticket), new_question (otherwise). Never invent ticket keys, statuses or workarounds. If the question is too vague to search, set clear to false.\n\nBefore deciding ticket_fits, fill ticket_condition with the condition under which the ticket's problem occurs, taken from its Symptoms and Root cause (for example: the exempt flag is still set after the certificate expired). Compare it with the facts stated in the question. If the question states or implies the opposite of that condition, set question_contradicts to true and explain in contradiction_reason. A ticket fits only if question_contradicts is false and the symptoms match.\n\nTickets labeled support-escalation are open escalations for a question nobody has answered yet. They have no symptoms, root cause or workaround. Such a ticket fits if the question asks about the same thing as the question in the ticket summary, even if worded differently. In that case set ticket_fits to true, route to known_issue, and leave workaround empty. If the question is about a different topic, it does not fit.\n\nSet ticket_type to the Jira issue type of the matched ticket as returned by get_ticket (Bug, Story, Task or Epic). known_issue and fixed_issue apply only to Bug tickets and to Tasks labeled support-escalation. Stories and Epics describe how the product works; they are never a known or fixed issue, and a question that is not reporting a problem or an unanswered question should not be matched to a ticket.\n\nFill every field. Use an empty string \"\" for text with no value, never null. distinct_customers must be a number, and clear, question_contradicts and ticket_fits must be true or false.\n\n\n\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "958a6c70-c772-4f81-9576-3f989efa8ec4",
+      "name": "Triage Agent",
+      "retryOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        912,
+        208
+      ],
+      "id": "93ba468e-a093-4e91-bfb2-9454b63e6d2b",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "Jira epics, stories and bugs: known issues, workarounds, status, fix versions",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "topK": 3,
+        "options": {
+          "pineconeNamespace": "jira"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        832,
+        432
+      ],
+      "id": "1a7aaf95-ef25-41b7-a504-7cd8cb514802",
+      "name": "search_jira",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        832,
+        608
+      ],
+      "id": "9dc7e2b1-a7e8-42c8-a6d8-ef2406653d67",
+      "name": "Embeddings OpenAI1",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Reads the live status, priority, labels and description of a Jira ticket by its key, for example INV-10.",
+        "url": "=https://anshumancricket.atlassian.net/rest/api/3/issue/{{ $fromAI('issue_key','Jira key such as INV-10','string') }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "summary,status,priority,labels,description,issuetype"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.5,
+      "position": [
+        1168,
+        432
+      ],
+      "id": "dec92c6c-4ab3-49e2-982c-4dc760ced368",
+      "name": "get_ticket",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "QTXL4ClE23AIv0sk",
+          "name": "Atlassian Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"route\":\"new_question\",\"clear\":true,\"ticket_key\":\"\",\"ticket_type\":\"\",\"ticket_condition\":\"\",\"question_contradicts\":false,\"contradiction_reason\":\"\",\"ticket_fits\":false,\"fit_reason\":\"\",\"status\":\"\",\"priority\":\"\",\"workaround\":\"\",\"fix_version\":\"\",\"rewritten_query\":\"\",\"distinct_customers\":1}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1264,
+        288
+      ],
+      "id": "924a2ccb-5052-49aa-9e20-7bfa6aa82f84",
+      "name": "Structured Output Parser",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {
+          "reasoningEffort": "medium"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1328,
+        480
+      ],
+      "id": "eaaa7788-0cc7-4dee-85dd-6411fc403b11",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const o = $json.output || $json;\nif (o.question_contradicts) { o.ticket_fits = false; }\nif (['Story', 'Epic'].includes(o.ticket_type)) { o.ticket_fits = false; }\nif (!o.ticket_fits) {\n  o.closest_ticket = o.ticket_key;\n  o.ticket_key = '';\n  o.status = '';\n  o.workaround = '';\n  o.priority = '';\n  o.fix_version = '';\n  if (o.route === 'known_issue' || o.route === 'fixed_issue') { o.route = 'new_question'; }\n}\nreturn { json: o };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        -16
+      ],
+      "id": "7bb3330e-05e9-4a36-9b92-d4e37f61d58d",
+      "name": "Triage Guard"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "256f120a-f046-4097-8991-710157f4c613",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "known_issue",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1632,
+        0
+      ],
+      "id": "10fe2c7c-5924-4014-b31e-d18c51122560",
+      "name": "Known Issue?"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c7779d38-77b8-4dcc-adf2-2412febf65ab",
+              "name": "answer",
+              "value": "={{ 'This is already tracked in ' + $json.ticket_key + ' (status: ' + $json.status + ', priority: ' + $json.priority + ').' + ($json.workaround ? ' Workaround: ' + $json.workaround : ' No workaround is documented yet; the Dev team has been notified.') }}",
+              "type": "string"
+            },
+            {
+              "id": "f34840f2-7478-480e-991a-4e2767030b85",
+              "name": "confidence",
+              "value": "=high",
+              "type": "string"
+            },
+            {
+              "id": "62b66d47-1185-4d8f-874b-57e330da9635",
+              "name": "recommend_escalation",
+              "value": "=false",
+              "type": "boolean"
+            },
+            {
+              "id": "43b6bc4d-1223-4e1b-a577-f0e562614b7a",
+              "name": "ticket_key",
+              "value": "={{ $json.ticket_key }}",
+              "type": "string"
+            },
+            {
+              "id": "9f2ef4e4-35af-47e6-b763-372d7f9731be",
+              "name": "ticket_url",
+              "value": "={{ 'https://anshumancricket.atlassian.net/browse/' + $json.ticket_key }}",
+              "type": "string"
+            },
+            {
+              "id": "f1ca2b48-7137-4666-afb4-a0f3b2cc3b61",
+              "name": "notes",
+              "value": "={{ $json.distinct_customers + ' customer(s) reported a similar problem in the last 24 hours.' }}",
+              "type": "string"
+            },
+            {
+              "id": "b9e2f7e2-0e99-4dcc-ae00-f254b5140f6b",
+              "name": "route",
+              "value": "={{ $json.route }}",
+              "type": "string"
+            },
+            {
+              "id": "2415e61d-a894-46b1-b623-a70d336d65bf",
+              "name": "next_step",
+              "value": "Send the customer the workaround and tell them the Dev team is tracking the issue.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2848,
+        -400
+      ],
+      "id": "aacef900-8165-40f1-8c73-df6b963b0f25",
+      "name": "Known Issue Card"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Question: {{ $('Parse Question').first().json.chatInput }}\nSearch hint: {{ $json.retry_query || $json.rewritten_query }}\nRetry: {{ $json.retry_query ? 'yes - the first search found too little; use this broader wording and different terms' : 'no' }}\n",
+        "options": {
+          "systemMessage": "You are the Retrieval Agent for Odoo customer invoice support. Given a support question, search the right sources. Use search_jira for errors, bugs and workarounds. Use search_design_docs for internal rules and design decisions. Use search_product_docs for how Odoo and AvaTax behave; the Odoo docs call AvaTax \"Avalara\", so search both names. If results are thin, retry once with different wording. Report only what the sources say, and list every source with its file, title or ticket key and its URL. Never invent a source. \n\nFor questions about whether something is supported, search both product docs and design docs before concluding it is missing. For any question about how something works today, also search design docs and Jira for planned changes, known issues or limitations before answering. \n\nFor questions about whether something is supported, search both product docs and design docs before concluding it is missing. For every source you use, include a line starting with EXCERPT: followed by one or two sentences copied verbatim from the sources, with it's URL or ticket key. Do not paraphrase inside EXCERPT lines. If your search found nothing about the topic asked, write: No source mentions the topic.\n\nFor every question, call search_product_docs, search_design_docs and search_jira at least once, even if the first search seems sufficient. In Jira, look for planned work, known issues and workarounds related to the topic."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1888,
+        64
+      ],
+      "id": "aa454cd7-a96d-4b0b-8b5d-1dffe2a5b235",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "How Odoo customer invoices and the AvaTax (Avalara) integration work: features, setup, limits",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "topK": 6,
+        "options": {
+          "pineconeNamespace": "odoo-docs"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        1952,
+        528
+      ],
+      "id": "f48196c9-a3a9-45b3-b6f8-0fd82726fe6d",
+      "name": "search_product_docs",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "Our internal design decisions, validation rules, rounding policy, release notes and known issues",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "options": {
+          "pineconeNamespace": "confluence"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        2144,
+        400
+      ],
+      "id": "431ce17d-a549-44ba-b135-0f664b871c3a",
+      "name": "search_design_docs",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        2576,
+        624
+      ],
+      "id": "f08a5534-3eeb-43c2-84b2-d102f3e421f8",
+      "name": "Embeddings OpenAI2",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Question: {{ $('Parse Question').first().json.chatInput }}\n\nTriage result: route={{ $('Triage Guard').first().json.route }}; ticket={{ $('Triage Guard').first().json.ticket_key }}; status={{ $('Triage Guard').first().json.status }}; fix_version={{ $('Triage Guard').first().json.fix_version }}; workaround={{ $('Triage Guard').first().json.workaround }}\n\nEvidence gathered by the Retrieval Agent:\n{{ $('AI Agent').item.json.output }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are the Synthesis Agent for Odoo customer invoice support. Use only the evidence provided; never invent features, ticket keys, numbers or countries. Treat AvaTax and Avalara as the same product. Draft a short reply under 120 words that an analyst could send to a customer.\n\nSet key_term to the specific detail the question asks about, as one distinctive word, never AvaTax, Avalara or Odoo. supporting_evidence must be copied word for word from one EXCERPT line. If no excerpt mentions the key_term, leave supporting_evidence empty, set confidence to low and recommend_escalation to true, and say the sources do not mention it. Only say something is unsupported if an excerpt says so.\n\nConfidence is high only if an excerpt directly states the answer, medium if it answers part of it or the sources differ, low otherwise. If a documentation excerpt and a design or Jira excerpt differ in what they say or in scope, state both in notes and name each source. In notes, name the ticket key or page title for every planned change or known issue.\n\nReply with one JSON object only. Every field is a plain string except citations (a list of objects with label and url) and recommend_escalation (true or false). notes is one string of at most 80 words.\n\nMention a ticket or workaround only if its symptoms match the question; never mention tickets that were merely nearby.\n\nThe Triage result tells you whether the problem is already known. If route is fixed_issue, say the problem is fixed in fix_version, that the customer needs that release or later, and offer the workaround only as a temporary option for older releases. Releases 3.1 and 3.2 are already released; only 3.3 is still planned. Never describe a released fix as a future release.\n\nIf both product documentation and our design or Jira sources address the question, use both. Always state any limits, conditions or regions that the excerpts mention. Use high confidence only if the excerpts answer the whole question; if they answer only part of it, or state a condition the question did not mention, use medium.\n\n\n\n\n"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2640,
+        -80
+      ],
+      "id": "a3516410-c7cd-49fb-8ed8-6fcf0e7d64b7",
+      "name": "Synthesis",
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\nconst o = $json.output || $json;\nconst raw = $('AI Agent').first().json.output || '';\nconst ev = norm(raw);\nconst ex = norm((raw.match(/excerpt[^\\n]*/gi) || []).join(' '));\nconst stop = ['from', 'with', 'that', 'this', 'have', 'does'];\nconst words = norm(o.key_term).split(' ').filter(w => w.length > 3 && !stop.includes(w)).map(w => w.slice(0,6));\nconst parts = (o.supporting_evidence || '').split(/[.;]/).map(norm).filter(p => p.split(' ').length >= 4);\nconst quoteOk = parts.some(p => ev.includes(p));\nconst topicOk = words.length > 0 && words.some(w => ex.includes(w));\no.citations = (o.citations || []).filter(c => c.url && raw.includes(c.url));\no.debug = JSON.stringify({ k: words, quoteOk: quoteOk, topicOk: topicOk });\nif (!(quoteOk && topicOk)) {\n  o.notes = '';\n  o.supporting_evidence = '';\n  o.recommend_escalation = true;\n  o.answer = 'The sources I searched do not mention \"' + (o.key_term || 'this topic') + '\", so I cannot confirm an answer. Recommend escalating to the Dev team.';\n  o.confidence_reason = 'No source excerpt mentions the topic.';\n  o.searched_sources = o.citations;\n  o.citations = [];\n}\n\nif (o.recommend_escalation) { o.confidence = 'low'; }\nreturn { json: o };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3104,
+        -96
+      ],
+      "id": "45ff5c40-1df2-49a3-ab63-627361cdd041",
+      "name": "Guard"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2768,
+        416
+      ],
+      "id": "7465825f-fd89-400b-981f-e238df68391b",
+      "name": "OpenAI Chat Model2",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1840,
+        432
+      ],
+      "id": "f24dcb9d-b548-4dff-b3d7-9ecce8d1f1c4",
+      "name": "OpenAI Chat Model3",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "Jira epics, stories and bugs: known issues, workarounds, status, fix versions",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "options": {
+          "pineconeNamespace": "jira"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        2288,
+        208
+      ],
+      "id": "19afbe85-351e-4878-b5d3-31da107b8b60",
+      "name": "search_jira1",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1840,
+        720
+      ],
+      "id": "d89f9115-7c60-4b69-9d65-5828817ad168",
+      "name": "Embeddings OpenAI3",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        2368,
+        720
+      ],
+      "id": "daa93351-8dbd-49f5-9978-b4f78251bf44",
+      "name": "Embeddings OpenAI4",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2592,
+        160
+      ],
+      "id": "d5945ed8-5730-4084-bab9-d4382af3e7f7",
+      "name": "OpenAI Chat Model4",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"answer\":\"\",\"key_term\":\"\",\"supporting_evidence\":\"\",\"confidence\":\"low, medium or high\",\"confidence_reason\":\"\",\"citations\":[{\"label\":\"\",\"url\":\"\"}],\"notes\":\"\",\"recommend_escalation\":false}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        2720,
+        144
+      ],
+      "id": "0452cfc5-3c92-466e-ba1f-f17526b49317",
+      "name": "Structured Output Parser1",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2210dfbe-63db-4abd-9427-9956f4a8dde9",
+              "name": "text",
+              "value": "={{ $json.question }}",
+              "type": "string"
+            },
+            {
+              "id": "dc13d6b8-14c0-4b95-8c0a-0d370fb52016",
+              "name": "customer_id",
+              "value": "={{ $json.customer_id }}",
+              "type": "string"
+            },
+            {
+              "id": "2dde0a2b-1cfc-4bea-bbea-7ee342dc0d6a",
+              "name": "asked_at",
+              "value": "={{  $json.asked_at }}",
+              "type": "string"
+            },
+            {
+              "id": "7493eaf3-388d-4f00-9a48-551dd5047b6a",
+              "name": "confidence",
+              "value": "={{ $json.confidence }}",
+              "type": "string"
+            },
+            {
+              "id": "4bb68d8d-b58b-4aab-925d-fd09d6d33d3f",
+              "name": "escalation_recommended",
+              "value": "={{ $json.recommend_escalation }}",
+              "type": "boolean"
+            },
+            {
+              "id": "4a3a7109-96af-49f1-9ced-666f4ba3cce4",
+              "name": "route",
+              "value": "={{ $json.route }}",
+              "type": "string"
+            },
+            {
+              "id": "0d2fdd3c-0fb2-4a29-bf72-bcbdec47a118",
+              "name": "ticket_key",
+              "value": "={{ $json.ticket_key }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        4784,
+        -560
+      ],
+      "id": "3f5eb555-29a2-4041-be95-85076db188ed",
+      "name": "Log Entry"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "options": {
+          "clearNamespace": false,
+          "pineconeNamespace": "question-log"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        5056,
+        -752
+      ],
+      "id": "756e5622-7100-4032-a907-90850c68e9cb",
+      "name": "Pinecone Vector Store",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json.text }}",
+        "options": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "customer_id",
+                "value": "={{ $json.customer_id }}"
+              },
+              {
+                "name": "asked_at",
+                "value": "={{ $json.asked_at }}"
+              },
+              {
+                "name": "confidence",
+                "value": "={{ $json.confidence }}"
+              },
+              {
+                "name": "escalation_recommended",
+                "value": "={{ $json.escalation_recommended }}"
+              },
+              {
+                "name": "route",
+                "value": "={{ $json.route }}"
+              },
+              {
+                "name": "ticket_key",
+                "value": "={{ $json.ticket_key }}"
+              }
+            ]
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        5200,
+        -480
+      ],
+      "id": "5991d181-3d93-44b7-8f53-9d6b8307952d",
+      "name": "Default Data Loader"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        4992,
+        -448
+      ],
+      "id": "a28fa73a-e409-4fa5-aa53-ea34973869c4",
+      "name": "Embeddings OpenAI5",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "message": "={{ $json.card_text + '\\n\\nReply APPROVE to send to the customer, ESCALATE to ask the Dev team, or type your edited answer.' }}\n",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        4896,
+        -288
+      ],
+      "id": "ed00ff54-0f02-4255-9a85-e4ee707c575d",
+      "name": "Chat",
+      "webhookId": "441242a1-708a-43d1-96ca-d85a6c954032"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const card = $('Analyst Card').first().json;\nconst j = $json;\nconst reply = String(j.data?.text ?? j.text ?? j.response ?? j.chatInput ?? j.message ?? '').trim();\nconst low = reply.toLowerCase();\nlet decision = 'edit';\nif (low === 'approve' || low === 'approved' || low === 'yes') decision = 'approve';\nelse if (low === 'escalate' || low === 'no') decision = 'escalate';\nelse if (!reply) decision = 'unclear';\nreturn { json: {\n  decision: decision,\n  reply: reply,\n  final_answer: decision === 'edit' ? reply : card.answer,\n  question: card.question,\n  customer_id: card.customer_id,\n  ticket_key: card.ticket_key,\n  route: card.route,\n  distinct_customers: card.distinct_customers,\n  debug_raw: JSON.stringify(j)\n} };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5136,
+        -272
+      ],
+      "id": "e0819f65-36c4-4f38-8938-45eb2403efa0",
+      "name": "Decision"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ ['approve','edit'].includes($json.decision) }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    },
+                    "id": "ac710089-d600-4fda-b698-55ee2ebf453f"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "send"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "327097b5-e645-4db6-bc6c-b1d3456312ff",
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "escalate",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "escalate"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "unclear"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        5376,
+        -304
+      ],
+      "id": "6c385ad2-a04f-4f3d-9a10-75624f155a49",
+      "name": "Route Decision"
+    },
+    {
+      "parameters": {
+        "message": "={{ 'Recorded as sent to the customer (simulated):\\n\\n' + $json.final_answer }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        5776,
+        -352
+      ],
+      "id": "5cca50bb-5feb-41f3-8474-96558b0add45",
+      "name": "Sent to Customer (simulated)",
+      "webhookId": "7648564e-40cf-48e5-87b6-beeec6ee2ea3"
+    },
+    {
+      "parameters": {
+        "message": "={{ 'Escalation ticket created: ' + $json.key + ' - https://anshumancricket.atlassian.net/browse/' + $json.key }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        6656,
+        336
+      ],
+      "id": "5a6be95e-7a94-46c6-bdcb-668bdeb3a6a9",
+      "name": "Escalation Requested",
+      "webhookId": "0c917a69-6c2a-4fe0-a275-3e602439a643"
+    },
+    {
+      "parameters": {
+        "message": "I did not get a clear reply, so nothing was sent. Reply APPROVE, ESCALATE, or type your edited answer.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        5648,
+        -96
+      ],
+      "id": "91841a10-1034-442f-8154-2185c01dcb0c",
+      "name": "Unclear Reply",
+      "webhookId": "dd46424d-f943-423a-a9dd-ef48b0f368a6"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const g = $json;\nconst t = $('Triage Guard').first().json;\nconst p = $('Parse Question').first().json;\nconst cites = (g.citations || []).map(c => c.label + ': ' + c.url);\nconst sources = g.ticket_url ? [g.ticket_url] : cites;\nconst esc = g.recommend_escalation !== undefined ? g.recommend_escalation : g.recommended_escalation;\nconst card = '**Draft answer** (confidence: ' + g.confidence + (esc ? ', escalation recommended' : '') + ')\\n\\n' + g.answer + '\\n\\n' + (g.notes ? '**Notes:** ' + g.notes + '\\n\\n' : '') + '**Sources:**\\n' + (sources.length ? sources.join('\\n') : 'None found') + '\\n\\nRoute: ' + t.route + (t.ticket_key ? ' (' + t.ticket_key + ')' : '') + ' | Similar reports in the last 24h: ' + t.distinct_customers;\n\nreturn { json: {\n  question: String(p.chatInput).trim(),\n  customer_id: String(p.customer_id).trim(),\n  asked_at: p.asked_at,\n  route: t.route,\n  ticket_key: t.ticket_key || '',\n  closest_ticket: t.closest_ticket || '',\n  distinct_customers: t.distinct_customers,\n  answer: g.answer,\n  confidence: g.confidence,\n  recommend_escalation: esc,\n  notes: g.notes || '',\n  sources: (sources.length ? sources.join('\\n') : 'None found'),\n  card_text: card + (g.next_step ? '\\n\\n**Suggested next step:** ' + g.next_step : ''),\n  orchestrator_decision: g.orchestrator_decision || ''\n} };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4528,
+        -512
+      ],
+      "id": "d721940d-c2a4-4fce-9381-18d5a1893929",
+      "name": "Analyst Card"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c = $('Analyst Card').first().json;\nconst n = Number(c.distinct_customers) || 1;\nconst q = String(c.question).replace(/\\s+/g, ' ').trim();\nconst desc = [\n  'h3. Escalated from the Support Copilot',\n  '*Question:* ' + q,\n  '*Customers reporting in the last 24h:* ' + n,\n  '*Agent route:* ' + c.route + (c.closest_ticket ? ' (closest ticket considered: ' + c.closest_ticket + ')' : ''),\n  '*Agent confidence:* ' + c.confidence,\n  '*Agent draft answer:* ' + c.answer,\n  '*Sources searched:* ' + (c.sources || 'none found'),\n  '*Requested by:* support analyst (customer details intentionally omitted)'\n].join('\\n\\n');\nconst payload = { fields: {\n  project: { key: 'INV' },\n  issuetype: { name: 'Task' },\n  summary: ('Support escalation: ' + q).slice(0, 120),\n  description: desc,\n  labels: ['support-escalation', 'customer-impact']\n} };\nreturn { json: { payload } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5920,
+        304
+      ],
+      "id": "71652f0a-787f-4454-b269-28930564ee5c",
+      "name": "Build Ticket"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://anshumancricket.atlassian.net/rest/api/2/issue",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        6272,
+        256
+      ],
+      "id": "1bff2169-5ace-4fea-99e2-a3d84f560902",
+      "name": "Create Jira Ticket",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "QTXL4ClE23AIv0sk",
+          "name": "Atlassian Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c = $('Analyst Card').first().json;\nconst key = $json.key;\nconst q = String(c.question).replace(/\\s+/g, ' ').trim();\nconst text = key + ' | Task | Support escalation: ' + q + '. Escalated by a support analyst; ' + (Number(c.distinct_customers) || 1) + ' customer(s) reported this in the last 24h. No workaround documented yet.';\nreturn { json: {\n  text: text,\n  issue_key: key,\n  issue_type: 'Task',\n  status: 'To Do',\n  priority: '',\n  labels: 'support-escalation,customer-impact',\n  parent_key: '',\n  source_url: 'https://anshumancricket.atlassian.net/browse/' + key,\n  updated: new Date().toISOString()\n} };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6640,
+        80
+      ],
+      "id": "ced4ef97-3840-4351-bb47-a77d71c28d07",
+      "name": "Ticket Doc"
+    },
+    {
+      "parameters": {
+        "chunkSize": 1500,
+        "chunkOverlap": 100,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        7744,
+        32
+      ],
+      "id": "bab77c56-fb65-4288-833f-2c44bac436e4",
+      "name": "Recursive Character Text Splitter"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "options": {
+          "clearNamespace": false,
+          "pineconeNamespace": "jira"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        7408,
+        -400
+      ],
+      "id": "7e16f0a9-26bb-403a-9c87-15830f5e7e30",
+      "name": "Pinecone Vector Store1",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        7360,
+        -128
+      ],
+      "id": "6dec5583-8e74-48f7-be85-c40f59e33d95",
+      "name": "Embeddings OpenAI6",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json.text }}",
+        "textSplittingMode": "custom",
+        "options": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "issue_key",
+                "value": "={{ $json.issue_key }}"
+              },
+              {
+                "name": "issue_type",
+                "value": "={{ $json.issue_type }}"
+              },
+              {
+                "name": "status",
+                "value": "={{ $json.status }}"
+              },
+              {
+                "name": "priority",
+                "value": "={{ $json.priority }}"
+              },
+              {
+                "name": "labels",
+                "value": "={{ $json.labels }}"
+              },
+              {
+                "name": "parent_key",
+                "value": "={{ $json.parent_key }}"
+              },
+              {
+                "name": "updated",
+                "value": "={{ $json.updated }}"
+              },
+              {
+                "name": "source_url",
+                "value": "={{ $json.source_url }}"
+              },
+              {
+                "name": "source_type",
+                "value": "jira"
+              },
+              {
+                "name": "audience",
+                "value": "analyst"
+              }
+            ]
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        7616,
+        -144
+      ],
+      "id": "84b8d987-1652-4aea-990c-926a63ed3521",
+      "name": "Default Data Loader1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b0bb5015-7b40-4215-8f48-a27e0f974087",
+              "leftValue": "={{ $('Analyst Card').first().json.ticket_key }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5440,
+        -672
+      ],
+      "id": "dd1ff454-3b93-4d58-91aa-2055e13a1735",
+      "name": "Has Ticket?"
+    },
+    {
+      "parameters": {
+        "mode": "load",
+        "pineconeIndex": {
+          "__rl": true,
+          "value": "invoice-support",
+          "mode": "list",
+          "cachedResultName": "invoice-support"
+        },
+        "prompt": "={{ $('Analyst Card').first().json.question }}",
+        "topK": 50,
+        "options": {
+          "pineconeNamespace": "question-log",
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "ticket_key",
+                "value": "={{ $('Analyst Card').first().json.ticket_key }}"
+              }
+            ]
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "typeVersion": 1.3,
+      "position": [
+        5712,
+        -752
+      ],
+      "id": "e4847a56-cb53-42f5-9095-af358959817b",
+      "name": "Customers For Ticket",
+      "credentials": {
+        "pineconeApi": {
+          "id": "YnJsx95og6ozqJI0",
+          "name": "Pinecone account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        5712,
+        -496
+      ],
+      "id": "4ce796f8-a2ec-44c4-9680-af7ad92735b2",
+      "name": "Embeddings OpenAI7",
+      "alwaysOutputData": true,
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2ecc9764-9ce4-4f5b-a9f4-c2047786d814",
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6288,
+        -768
+      ],
+      "id": "5ac5140a-660c-44a7-8c87-16b4da29e8e8",
+      "name": "Spike?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://anshumancricket.atlassian.net/rest/api/2/issue/' + $json.ticket_key + '/comment' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Support Copilot impact update: ' + $json.affected + ' customers reported this issue in the last 24 hours. Priority review recommended; a priority change needs Dev lead confirmation.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        6576,
+        -784
+      ],
+      "id": "787ff246-7932-4a24-a2a5-333eb35fdce3",
+      "name": "Comment on Ticket",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "QTXL4ClE23AIv0sk",
+          "name": "Atlassian Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "message": "={{ 'HIGH-PRIORITY ALERT: ' + $('Spike Check').first().json.ticket_key + ' affects ' + $('Spike Check').first().json.affected + ' customers in the last 24 hours. An impact comment was added. Proposed action: raise priority; Dev lead to confirm. https://anshumancricket.atlassian.net/browse/' + $('Spike Check').first().json.ticket_key }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        6912,
+        -800
+      ],
+      "id": "5eb354fc-2e25-4522-8cbb-56b25d499c4c",
+      "name": "Dev Lead Alert",
+      "webhookId": "0a312f00-3021-4a8d-8636-0d07160cc8fc"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cur = $('Analyst Card').first().json;\nconst now = Date.now();\nconst rows = $input.all().filter(i => i.json.document).map(i => ({\n  c: String(i.json.document.metadata.customer_id).trim(),\n  at: Number(i.json.document.metadata.asked_at)\n})).filter(r => now - r.at <= 86400000 && r.c !== 'UNKNOWN');\nconst all = new Set(rows.map(r => r.c));\nall.add(String(cur.customer_id).trim());\nconst before = new Set(rows.filter(r => r.at < Number(cur.asked_at)).map(r => r.c));\nconst n = all.size;\nreturn [{ json: { ticket_key: cur.ticket_key, affected: n, before: before.size, alert: n >= 3 && n > before.size } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6064,
+        -768
+      ],
+      "id": "4e523e77-f4bd-4df1-88e7-cec9295f4f85",
+      "name": "Spike Check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9df25eaa-1660-44a6-bf44-4d52875a3391",
+              "leftValue": "={{ $('Analyst Card').first().json.route }}",
+              "rightValue": "known_issue",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5952,
+        -192
+      ],
+      "id": "758a2caa-cc24-41c3-9625-f4ef1706017d",
+      "name": "Existing Ticket?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://anshumancricket.atlassian.net/rest/api/2/issue/' + $('Analyst Card').first().json.ticket_key + '/comment' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Support analyst escalated this again: ' + $('Analyst Card').first().json.distinct_customers + ' customer(s) reported it in the last 24 hours. Please review priority and workaround.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        6384,
+        -320
+      ],
+      "id": "73ed9051-af5c-4491-8596-217f2ba1cfd5",
+      "name": "Comment Existing Ticket",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "QTXL4ClE23AIv0sk",
+          "name": "Atlassian Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "message": "={{ 'No new ticket created. This is already tracked in ' + $('Analyst Card').first().json.ticket_key + '; a comment was added: https://anshumancricket.atlassian.net/browse/' + $('Analyst Card').first().json.ticket_key }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        6736,
+        -352
+      ],
+      "id": "c29da1ef-d7dd-4625-bdad-266b9631da74",
+      "name": "Already Tracked",
+      "webhookId": "2683b869-dbbf-48a2-b3ed-0b97de8a2f15"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Question: {{ $('Parse Question').first().json.chatInput }}\nTriage route: {{ $('Triage Guard').first().json.route }}\nDraft answer: {{ $json.answer }}\nConfidence: {{ $json.confidence }}\nEvidence found: {{ $json.supporting_evidence ? 'yes' : 'no' }}\nEscalation recommended: {{ $json.recommend_escalation }}\nNotes: {{ $json.notes }}\nRetry already used: {{ $runIndex >= 1 ? 'yes' : 'no' }}\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are the Orchestrator for Odoo customer invoice support. A Retrieval agent and a Synthesis agent produced a draft. Decide the next step. \n\npresent: evidence was found, so the draft is grounded. \n\nretry: no evidence was found, retry has not been used, and the question is about invoicing, taxes, AvaTax or our integration, so different wording might find it. Give a broader retry_query that uses synonyms (AvaTax = Avalara; tax engine, tax provider, posting, confirming, draft). \n\nescalate: no evidence was found and either retry was already used or the question asks about a specific third-party product or feature that is not in our sources. Never choose retry when Retry already used is yes. Also write next_step: one sentence telling the support analyst what to do next.\n\nnext_step is advice to the support analyst. Never suggest sharing internal Jira tickets, Confluence pages or ticket numbers with the customer; the customer-facing reply should contain only the answer. Keep next_step under 30 words.\n\nretry_query must be one short search phrase of at most 15 words, not a list. A question asking whether we support a named third-party product (for example Vertex, TaxJar or SAP) is always escalate, never retry. next_step must only use facts that appear in the draft answer or notes; do not invent field names or requirements.\n\nnext_step must not refer to tickets or issues that are unrelated to the question."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        3296,
+        80
+      ],
+      "id": "a32d49b9-5909-4b48-b5a0-a294809805aa",
+      "name": "Orchestrator",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "reasoningEffort": "medium"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3200,
+        336
+      ],
+      "id": "03de8e48-30b5-48de-9270-1569c0c55b7a",
+      "name": "OpenAI Chat Model5",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"reason\":\"\",\"decision\":\"present\",\"retry_query\":\"\",\"next_step\":\"\"}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        3376,
+        320
+      ],
+      "id": "0467acb1-7f61-4557-a8c8-9de2cae8cd90",
+      "name": "Structured Output Parser2",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3328,
+        496
+      ],
+      "id": "7c08f069-1370-4d8d-92ba-7c28e96599f3",
+      "name": "OpenAI Chat Model6",
+      "credentials": {
+        "openAiApi": {
+          "id": "lAoWEBn8xnYz5oh7",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const o = $json.output || $json;\nconst g = $('Guard').first().json;\nconst retried = $runIndex >= 1;\nlet decision = o.decision || 'present';\nif (decision === 'retry' && retried) { decision = 'escalate'; }\nconst out = Object.assign({}, g);\nout.orchestrator_decision = decision;\nout.orchestrator_reason = o.reason || '';\nout.next_step = o.next_step || '';\nout.retry_query = String(o.retry_query || '').split('\\n')[0].slice(0, 150);\nif (decision === 'escalate') {\n  out.recommend_escalation = true;\n  if (!g.supporting_evidence) { out.confidence = 'low'; }\n}\nreturn { json: out };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3664,
+        224
+      ],
+      "id": "6f675c9a-eda9-4375-9697-3709ee690ac6",
+      "name": "Merge Orchestrator"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b27157ed-b3ad-4493-aeb2-8da4e2dd4b41",
+              "leftValue": "={{ $json.orchestrator_decision }}",
+              "rightValue": "retry",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3888,
+        208
+      ],
+      "id": "af1e25ff-c9b4-413a-8c2c-6234f5779fa1",
+      "name": "Retry?"
+    },
+    {
+      "parameters": {
+        "message": "I could not finish checking this question (the triage lookup failed). Nothing was sent to the customer. Please send the question again, or escalate it to the Dev team directly.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        1472,
+        144
+      ],
+      "id": "7037edad-cf8b-424d-b736-5da6ff7e267d",
+      "name": "Lookup Failed",
+      "webhookId": "bb89ad2a-0bdb-4e8a-b55c-5f1fc06add5a"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Parse Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Question": {
+      "main": [
+        [
+          {
+            "node": "Recent Questions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Recent Questions",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recent Questions": {
+      "main": [
+        [
+          {
+            "node": "Count Repeats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Repeats": {
+      "main": [
+        [
+          {
+            "node": "Triage Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Triage Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_jira": {
+      "ai_tool": [
+        [
+          {
+            "node": "Triage Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI1": {
+      "ai_embedding": [
+        [
+          {
+            "node": "search_jira",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_ticket": {
+      "ai_tool": [
+        [
+          {
+            "node": "Triage Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Triage Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Structured Output Parser",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage Agent": {
+      "main": [
+        [
+          {
+            "node": "Triage Guard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lookup Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage Guard": {
+      "main": [
+        [
+          {
+            "node": "Known Issue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Known Issue?": {
+      "main": [
+        [
+          {
+            "node": "Known Issue Card",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Synthesis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_product_docs": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_design_docs": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI2": {
+      "ai_embedding": [
+        [
+          {
+            "node": "search_jira1",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthesis": {
+      "main": [
+        [
+          {
+            "node": "Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Structured Output Parser1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_jira1": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI3": {
+      "ai_embedding": [
+        [
+          {
+            "node": "search_product_docs",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI4": {
+      "ai_embedding": [
+        [
+          {
+            "node": "search_design_docs",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model4": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Synthesis",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Synthesis",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Known Issue Card": {
+      "main": [
+        [
+          {
+            "node": "Analyst Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guard": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Entry": {
+      "main": [
+        [
+          {
+            "node": "Pinecone Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Pinecone Vector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI5": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Pinecone Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat": {
+      "main": [
+        [
+          {
+            "node": "Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision": {
+      "main": [
+        [
+          {
+            "node": "Route Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Decision": {
+      "main": [
+        [
+          {
+            "node": "Sent to Customer (simulated)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Existing Ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unclear Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyst Card": {
+      "main": [
+        [
+          {
+            "node": "Log Entry",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalation Requested": {
+      "main": [
+        []
+      ]
+    },
+    "Build Ticket": {
+      "main": [
+        [
+          {
+            "node": "Create Jira Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira Ticket": {
+      "main": [
+        [
+          {
+            "node": "Escalation Requested",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Ticket Doc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recursive Character Text Splitter": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Default Data Loader1",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI6": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Pinecone Vector Store1",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader1": {
+      "ai_document": [
+        [
+          {
+            "node": "Pinecone Vector Store1",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ticket Doc": {
+      "main": [
+        [
+          {
+            "node": "Pinecone Vector Store1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinecone Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Has Ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Ticket?": {
+      "main": [
+        [
+          {
+            "node": "Customers For Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI7": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Customers For Ticket",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customers For Ticket": {
+      "main": [
+        [
+          {
+            "node": "Spike Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spike?": {
+      "main": [
+        [
+          {
+            "node": "Comment on Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comment on Ticket": {
+      "main": [
+        [
+          {
+            "node": "Dev Lead Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spike Check": {
+      "main": [
+        [
+          {
+            "node": "Spike?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing Ticket?": {
+      "main": [
+        [
+          {
+            "node": "Comment Existing Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comment Existing Ticket": {
+      "main": [
+        [
+          {
+            "node": "Already Tracked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Orchestrator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser2": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Orchestrator",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model6": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Structured Output Parser2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator": {
+      "main": [
+        [
+          {
+            "node": "Merge Orchestrator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Orchestrator": {
+      "main": [
+        [
+          {
+            "node": "Retry?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry?": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analyst Card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "27558b79-8741-4c2c-a70d-b5789dc4477b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e659e67db4c700d35b510176557990b968ee39f5fc747ecce82a8fa147b96e18"
+  },
+  "nodeGroups": [],
+  "id": "Rf86gizf7dBcs0F8",
+  "tags": []
+}
